@@ -81,12 +81,12 @@ object Tfl {
     term match {
       case id: Identifier                  => environment.getOrElse(id, id)
       case Fun(parameter, body)            =>
-        Fun(parameter, substitute(body, environment))
+        Fun(parameter, subs(body, environment))
       case App(functionTerm, argumentTerm) =>
-        App(substitute(functionTerm, environment), substitute(argumentTerm, environment))
+        App(subs(functionTerm, environment), subs(argumentTerm, environment))
       case Closure(fun, env)               =>
-        val senv = env.map { case (k, v) => k -> interpret(substitute(v, env - k), Map()) }
-        substitute(fun, senv)
+        val senv = env.map { case (k, v) => k -> interpret(subs(v, Map()), Map()) }
+        subs(fun, senv)
       case t: Text                         => t
     }
   }
@@ -163,7 +163,7 @@ object Tfl {
 //    pprintln(interpret(program, Map()))
     pprintln(program)
     println(interpret(program, Map()).format)
-//    pprintln(stepAll(Configuration(program, Map())))
+    pprintln(stepAll(Configuration(program("1")("0"), Map())))
   }
 
 }
