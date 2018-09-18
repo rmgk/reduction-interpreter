@@ -19,7 +19,7 @@ object Tfl {
   }
   implicit def symbolToId(symbol: Symbol): Identifier = Identifier(symbol)
 
-  case class Fun(parameter: Identifier, body: Term) extends Term {
+  case class Fun(parameter: Identifier, body: Term) extends Value {
     override def format(): String = s"(${parameter.format} => ${body.format})"
     override def tex(): String = s"(\\fun{${parameter.tex}}{${body.tex()}})"
   }
@@ -33,10 +33,10 @@ object Tfl {
 
   type Environment = Map[Identifier, Value]
 
-  case class Closure(fun: Fun, environment: Environment) extends Value {
-    override def format(): String = s"Closure(${fun.format()},$environment)"
-    override def tex(): String = s"Closure(${fun.tex()},$environment)"
-  }
+//  case class Closure(fun: Fun, environment: Environment) extends Value {
+//    override def format(): String = s"Closure(${fun.format()},$environment)"
+//    override def tex(): String = s"Closure(${fun.tex()},$environment)"
+//  }
 
   def id: Fun = 'x =>: 'x
   def zero: Fun = 'f =>: 'x =>: 'x
@@ -50,25 +50,25 @@ object Tfl {
     case id: Identifier => Set(id)
     case Fun(parameter, body) => freeVariables(body) - parameter
     case App(function, argument) => freeVariables(function) ++ freeVariables(argument)
-    case _: Closure | _ : Text => Set()
+    case _ : Text => Set()
   }
 
 
   def interpret(term: Term, environment: Environment): Value = {
     term match {
       case id: Identifier                  => environment(id)
-      case fun: Fun                        =>
-        val environmentOfFreeVariables = environment -- (environment.keySet -- freeVariables(fun))
-        Closure(fun, environmentOfFreeVariables)
+//      case fun: Fun                        =>
+//        val environmentOfFreeVariables = environment -- (environment.keySet -- freeVariables(fun))
+//        Closure(fun, environmentOfFreeVariables)
       case App(functionTerm, argumentTerm) =>
         val argument = interpret(argumentTerm, environment)
         interpret(functionTerm, environment) match {
-          case Closure(function, closureEnvironment) =>
-            interpret(function.body, closureEnvironment + (function.parameter -> argument))
+          case function : Fun =>
+            interpret(subs(function.body, function.parameter, argument), Map())
           case t @ Text(s1) =>
             argument match {
               case Text(s2) => Text(s1 + s2)
-              case _ => Closure('x =>: t(argument('x)), environment)
+              case _ => 'x =>: t(argument('x))
             }
 
         }
@@ -76,29 +76,26 @@ object Tfl {
     }
   }
 
-
-  def subs(term: Term, environment: Environment): Term = {
+  def subs(term: Term, parameter: Identifier, argument: Value): Term = {
+    val freeVar = freeVariables(argument)
+    assert(freeVar == Set(), s"unbound identifier $freeVar")
     term match {
-      case id: Identifier                  => environment.getOrElse(id, id)
-      case Fun(parameter, body)            =>
-        Fun(parameter, subs(body, environment))
+      case id: Identifier                  if id == parameter => argument
+      case Fun(param, body)         if param != parameter    =>
+        Fun(param, subs(body, parameter, argument))
       case App(functionTerm, argumentTerm) =>
-        App(subs(functionTerm, environment), subs(argumentTerm, environment))
-      case Closure(fun, env)               =>
-        val senv = env.map { case (k, v) => k -> interpret(subs(v, Map()), Map()) }
-        subs(fun, senv)
-      case t: Text                         => t
+        App(subs(functionTerm, parameter, argument), subs(argumentTerm, parameter, argument))
+//      case Closure(fun, env)               =>
+//        val senv = env.map { case (k, v) => k -> interpret(subs(v, Map()), Map()) }
+//        subs(fun, senv)
+      case other                      => other
     }
   }
 
-  def substitute(term: Term, environment: Environment): Term = {
-    subs(subs(term, environment), Map())
-  }
-
-  case class Configuration(term: Term, environment: Environment) {
+  case class Configuration(term: Term) {
     def derive(name: String, to: Configuration, premises: List[Rule] = Nil): Some[Rule] = Some(Rule(name, this, to, premises))
-    def format(): String = substitute(term, environment).format()
-    def tex(): String = substitute(term, environment).tex()
+    def format(): String = term.format()
+    def tex(): String = term.tex()
   }
   case class Rule(name: String, from: Configuration, to: Configuration, premises: List[Rule] = Nil) {
     def tex(): String =
@@ -109,21 +106,25 @@ object Tfl {
   }
 
   def step(conf: Configuration): Option[Rule] = {
-    val environment = conf.environment
     conf.term match {
       case _: Value                        => None
-      case id: Identifier                  => conf.derive("env", conf.copy(term = environment(id)))
-      case fun: Fun => conf.derive("close", conf.copy(Closure(fun, environment)))
-      case App(Closure(function, closureEnvironment), argument: Value) => conf.derive("app", {
-        Configuration(function.body, closureEnvironment + (function.parameter -> argument))
+      case id: Identifier                  => None
+      case App(function: Fun, argument: Value) => conf.derive("app", {
+        Configuration(subs(function.body, function.parameter, argument))
+      })
+      case App(Text(s1), Text(s2)) => conf.derive("concat text", {
+        conf.copy(Text(s1 + s2))
+      })
+      case App(t@Text(s1), v: Fun) => conf.derive("concat other", {
+        conf.copy('x =>: t(v('x)))
       })
       case app @ App(closure: Value, argument) =>
         step(conf.copy(argument)).flatMap{ inner =>
-          conf.derive("context", inner.to.copy(app.copy(argument = inner.to.term)), List(inner))
+          conf.derive("context", conf.copy(app.copy(argument = inner.to.term)), List(inner))
         }
       case app @ App(function, _) =>
         step(conf.copy(function)).flatMap { inner =>
-          conf.derive("context", inner.to.copy(app.copy(inner.to.term)), List(inner))
+          conf.derive("context", conf.copy(app.copy(inner.to.term)), List(inner))
         }
     }
   }
@@ -133,6 +134,7 @@ object Tfl {
       case None => conf
       case Some(p) =>
         println(p.format)
+        //pprintln(p, height = 500)
         stepAll(p.to)
     }
   }
@@ -154,7 +156,7 @@ object Tfl {
 
   def main(args: Array[String]): Unit = {
 //    val program = ('x =>: 'x('x))('y =>: 'y)
-    val program = times(succ(two))(add(one)(times(two)(add(two)(two))))
+    val program = times(add(one)(two))(one(add(succ(two))(times(two)(succ(two)))))
     pprintln(toInt(program))
 //    val res = interpret(program, Map())
 //    pprintln(res)
@@ -162,8 +164,8 @@ object Tfl {
 //    println(program.tex())
 //    pprintln(interpret(program, Map()))
     pprintln(program)
-    println(interpret(program, Map()).format)
-    pprintln(stepAll(Configuration(program("1")("0"), Map())))
+//    println(interpret(program("1")("0"), Map()).format)
+    pprintln(stepAll(Configuration(program("1")("0")("0"))))
   }
 
 }
