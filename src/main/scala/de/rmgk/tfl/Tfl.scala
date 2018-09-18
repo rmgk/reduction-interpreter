@@ -68,7 +68,7 @@ object Tfl {
           case t @ Text(s1) =>
             argument match {
               case Text(s2) => Text(s1 + s2)
-              case _ => Closure('x =>: 'x(t), environment)
+              case _ => Closure('x =>: t(argument('x)), environment)
             }
 
         }
@@ -154,8 +154,8 @@ object Tfl {
 
   def main(args: Array[String]): Unit = {
 //    val program = ('x =>: 'x('x))('y =>: 'y)
-    val program = add(two)(two)("1")("0")("0")
-//    pprintln(toInt(program))
+    val program = times(succ(two))(add(one)(times(two)(add(two)(two))))
+    pprintln(toInt(program))
 //    val res = interpret(program, Map())
 //    pprintln(res)
 //    pprintln(substitute(substitute(res, Map()), Map()))
@@ -163,7 +163,7 @@ object Tfl {
 //    pprintln(interpret(program, Map()))
     pprintln(program)
     println(interpret(program, Map()).format)
-    pprintln(stepAll(Configuration(program, Map())))
+//    pprintln(stepAll(Configuration(program, Map())))
   }
 
 }
