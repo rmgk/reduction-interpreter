@@ -99,7 +99,7 @@ object Tfl {
   }
   case class Rule(name: String, from: Configuration, to: Configuration, premises: List[Rule] = Nil) {
     def tex(): String =
-      s"\\infer{${premises.map(_.tex).mkString("{", "} \\and {", "}")}}{${from.tex} → ${to.tex}} \\named{$name}"
+      s"\\infer{${premises.map(_.tex).mkString("{", "} \\and {", "}")}}{${from.tex}\\\\ → ${to.tex}} \\named{$name}"
     def format(): String =
       s"${to.format} [$nameTree]"
     def nameTree(): String = s"$name [${premises.map(_.nameTree()).mkString(",")}]"
@@ -133,7 +133,7 @@ object Tfl {
     step(conf) match {
       case None => conf
       case Some(p) =>
-        println(p.format)
+        println(p.tex)
         //pprintln(p, height = 500)
         stepAll(p.to)
     }
@@ -155,17 +155,17 @@ object Tfl {
   }
 
   def main(args: Array[String]): Unit = {
-//    val program = ('x =>: 'x('x))('y =>: 'y)
-    val program = times(add(one)(two))(one(add(succ(two))(times(two)(succ(two)))))
+    val program = ('x =>: 'x('x)('x)('x))('y =>: 'z =>:  'z('y))
+//    val program = times(add(one)(two))(one(add(succ(two))(times(two)(succ(two)))))
     pprintln(toInt(program))
 //    val res = interpret(program, Map())
 //    pprintln(res)
 //    pprintln(substitute(substitute(res, Map()), Map()))
 //    println(program.tex())
 //    pprintln(interpret(program, Map()))
-    pprintln(program)
+    println(program.tex)
 //    println(interpret(program("1")("0"), Map()).format)
-    pprintln(stepAll(Configuration(program("1")("0")("0"))))
+    pprintln(stepAll(Configuration(program)))
   }
 
 }
