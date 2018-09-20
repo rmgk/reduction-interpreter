@@ -24,7 +24,7 @@ libraryDependencies ++= Seq(
 Compile / compile / scalacOptions ++= Seq(
   "-deprecation",
   "-encoding", "UTF-8",
-  "-Ypatmat-exhaust-depth", "65536",
+  "-Ypatmat-exhaust-depth", "80",
   "-unchecked",
   "-feature",
   "-Xlint",
