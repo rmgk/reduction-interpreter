@@ -10,6 +10,7 @@ object Tfl {
   sealed trait Term {
     def apply(argument: Term) = App(this, argument)
     def =>:(identifier: Identifier): Fun = Fun(identifier, this)
+    def fold(value: Term)(operator: Term) = Fold(this, value, operator)
     def tex(): String = toString
   }
   sealed trait Stuck extends Term
@@ -36,10 +37,12 @@ object Tfl {
   case class TryCatch(body: Term, handler: Term) extends Term
 
   case class Reactive(id: UUID) extends Value
-  case class Var(init: Term) extends Term {
-    override def toString(): String = s"Var(${init.toString()})"
+  case object Evt extends Term {
   }
-  case class Fold(input: Term, initial: Term, operator: Term) extends Term
+  def Var(init: Term): Term = Let('aVal, Evt, 'aVal.fold(init){'_ =>: 'new =>: 'new} )
+  case class Fold(input: Term, initial: Term, operator: Term) extends Term {
+    override def toString(): String = s"Fold(${input.toString()}, ${initial.toString}, ${operator.toString})"
+  }
   case class Access(target: Term) extends Term {
     override def toString(): String = s"${target.toString()}.value"
   }
@@ -52,22 +55,23 @@ object Tfl {
   case class Stored(value     : Stuck,
                     time      : Time,
                     operator  : Term,
-                    inputs    : Set[Reactive],
+                    inputs    : List[Reactive],
                     outputs   : Set[Reactive],
                     continuous: Boolean) {
     def addOutput(o: Reactive): Stored = copy(outputs = outputs + o)
   }
   object Store {
-    def Evt(value: Stuck) = Stored(value, 0, unit, Set.empty, Set.empty, continuous = false)
+    def Evt() = Stored(unit, 0, unit, Nil, Set.empty, continuous = false)
     def Fold(self: Reactive, inputI: Reactive, initialI: Stuck, operatorI: Stuck): Stored =
-      Stored(initialI, 0, operatorI, Set(inputI, self), Set.empty, continuous = true)
+      Stored(initialI, 0, operatorI, List(self, inputI), Set.empty, continuous = true)
   }
 
   case class Store(mapping: Map[Reactive, Stored]) {
+    def isEmpty: Boolean = mapping.isEmpty
     def apply(r: Reactive): Stored = mapping.apply(r)
     def update(r: Reactive, v: Stuck): Store = copy(mapping.updated(r, mapping(r).copy(value = v)))
     def value(r: Reactive): Stuck = mapping.get(r).map(_.value).getOrElse(Error(s"unknown reactive $r"))
-    def addDependencies(r: Reactive, inputs: Set[Reactive]): Store = copy {
+    def addDependencies(r: Reactive, inputs: Iterable[Reactive]): Store = copy {
       inputs.filter(_ != r).foldLeft(mapping){(acc, i) =>
         acc.updated(i, mapping(i).addOutput(r))
       }
@@ -77,6 +81,7 @@ object Tfl {
       addDependencies(r, stored.inputs)
       .copy(mapping.updated(r, stored))
     }
+    def reactives: Set[Reactive] = mapping.keySet
   }
 
 //  case class Closure(fun: Fun, environment: Environment) extends Value {
@@ -89,12 +94,12 @@ object Tfl {
     case Fun(parameter, body)           => freeVariables(body) - parameter
     case App(function, argument)        => freeVariables(function) ++ freeVariables(argument)
     case TryCatch(body, handler)        => freeVariables(body) ++ freeVariables(handler)
-    case Var(init)                      => freeVariables(init)
     case Fold(input, initial, operator) => freeVariables(input) ++ freeVariables(initial) ++ freeVariables(operator)
     case Access(target)                 => freeVariables(target)
     case _: Text |
          _: Error |
-         _: Reactive                    => Set()
+         _: Reactive |
+         Evt                            => Set()
   }
 
   case class InterpreterResult(value: Stuck, store: Store)
@@ -127,10 +132,9 @@ object Tfl {
           case other    => res.copy(other)
         }
 
-      case Var(init) =>
-        val res = interpret(init, store)
+      case Evt =>
         val r = Reactive(UUID.randomUUID())
-        InterpreterResult(r, store.add(r, Store.Evt(res.value)))
+        InterpreterResult(r, store.add(r, Store.Evt()))
 
       case Fold(input, initial, operator) =>
         interpret(input, store) match {
@@ -169,22 +173,45 @@ object Tfl {
       case App(functionTerm, argumentTerm) =>
         App(subs(functionTerm, parameter, argument), subsi(argumentTerm))
       case Access(target)                  => Access(subsi(target))
-      case Var(init)                       => Var(subsi(init))
       case TryCatch(body, handler)         => TryCatch(subsi(body), subsi(handler))
       case Fold(a, b, c)                   => Fold(subsi(a), subsi(b), subsi(c))
       case _: Text |
            _: Error |
            _: Reactive |
-           _: Identifier                   => term
+           _: Identifier |
+           Evt                             => term
     }
   }
 
-  case class Configuration(term: Term, store: Store) {
-    def derive(name: String, to: Term, premises: List[Rule] = Nil, newStore: Store = store): Some[Rule] =
-      Some(Rule(name, this, Configuration(to, newStore), premises))
+  case class UpdatePropagation(outdated: Set[Reactive], finalized: Set[Reactive]) {
+    def reevaluate(toEval: Reactive, outputs: Set[Reactive]): Some[UpdatePropagation] =
+      Some(UpdatePropagation(outdated ++ outputs - toEval, finalized + toEval))
+
+    def skip(reactives: Set[Reactive]): Some[UpdatePropagation] = Some(copy(finalized = finalized ++ reactives))
+  }
+
+  case class Configuration(term: Term,
+                           store: Store,
+                           propagation: Option[UpdatePropagation],
+                           reevaluation: Option[(Term, Reactive)]
+                          ) {
+    def derive(name         : String,
+               toTerm       : Term = term,
+               premises     : List[Rule] = Nil,
+               toStore      : Store = store,
+               toPropagation: Option[UpdatePropagation] = propagation,
+               toReevaluate : Option[(Term, Reactive)] = reevaluation
+              )
+    : Some[Rule] = {
+      Some(Rule(name, this, Configuration(toTerm, toStore, toPropagation, toReevaluate), premises))
+    }
     def format(): String = term.toString()
     def tex(): String = term.tex()
   }
+  object Configuration {
+    def apply(term: Term): Configuration = Configuration(term, Store(Map()), None, None)
+  }
+
   case class Rule(name: String, from: Configuration, to: Configuration, premises: List[Rule] = Nil) {
     def tex(): String =
       s"\\infer{${premises.map(_.tex).mkString("{", "} \\and {", "}")}}{${from.tex}\\\\ → ${to.tex}} \\named{$name}"
@@ -193,13 +220,13 @@ object Tfl {
     def nameTree(): String = s"$name [${premises.map(_.nameTree()).mkString(",")}]"
   }
 
-  def step(conf: Configuration): Option[Rule] = {
 
+  def stepTerm(conf: Configuration): Option[Rule] = {
     def context(term: Term, outer: Term => Term): Option[Rule] = {
       term match {
         case err: Error => conf.derive("error", err)
         case nonError   =>
-          step(conf.copy(nonError)).flatMap { inner =>
+          stepTerm(conf.copy(nonError)).flatMap { inner =>
             inner.to.derive("context", outer(inner.to.term), List(inner))
           }
       }
@@ -218,26 +245,83 @@ object Tfl {
       case TryCatch(Error(_), handler) => conf.derive("catch", handler)
       case TryCatch(value: Value, _)   => conf.derive("try", value)
 
-      case App(r: Reactive, v: Value) => conf.derive("fire", r, newStore = conf.store(r) = v)
-      case Access(target: Reactive)   => conf.derive("access", conf.store.value(target))
-      case Var(init: Value)           =>
+      case App(r: Reactive, v: Value) => conf.derive("fire", r, toStore = conf.store(r) = v,
+                                                     toPropagation = Some(UpdatePropagation(conf.store(r).outputs,
+                                                                                            Set(r))))
+
+      case Access(target: Reactive) => conf.derive("access", conf.store.value(target))
+
+      case Evt =>
         val r = Reactive(UUID.randomUUID())
-        conf.derive("var", r, newStore = conf.store.add(r, Store.Evt(init)))
+        conf.derive("var", r, toStore = conf.store.add(r, Store.Evt()))
 
       case Fold(input: Reactive, initial: Value, operator: Fun) =>
         val r = Reactive(UUID.randomUUID())
-        conf.derive("fold", r, newStore = conf.store.add(r, Store.Fold(r, input, initial, operator)))
+        conf.derive("fold", r, toStore = conf.store.add(r, Store.Fold(r, input, initial, operator)))
 
 
       case tc@TryCatch(body, _)        => context(body, inner => tc.copy(body = inner))
       case app@App(_: Value, argument) => context(argument, inner => app.copy(argument = inner))
       case app@App(function, _)        => context(function, inner => app.copy(function = inner))
       case acc@Access(target)          => context(target, inner => acc.copy(target = inner))
-      case v@Var(init)                 => context(init, inner => v.copy(init = inner))
 
       case f@Fold(_: Reactive, _: Value, term) => context(term, inner => f.copy(operator = inner))
       case f@Fold(_: Reactive, term, _)        => context(term, inner => f.copy(initial = inner))
       case f@Fold(term, _, _)                  => context(term, inner => f.copy(input = inner))
+    }
+  }
+
+  def stepPropagation(conf: Configuration): Option[Rule] = {
+
+    def ready(finalized: Set[Reactive])(reactive: Reactive): Boolean =
+      conf.store(reactive).inputs.filter(_ != reactive).toSet.subsetOf(finalized)
+
+    conf.propagation.flatMap {
+      case currentPropagation@UpdatePropagation(outdated, finalized) =>
+        if (outdated.isEmpty) conf.derive("clean", toPropagation = None)
+        else {
+          val skippable = conf.store.reactives.filter(ready(finalized))
+          if (skippable.nonEmpty) {
+            conf.derive("skip", toPropagation = currentPropagation.skip(skippable))
+          }
+          else {
+            outdated.find(ready(finalized)).flatMap { toEval =>
+              val stored = conf.store(toEval)
+              val nextPropagation = currentPropagation.reevaluate(toEval, stored.outputs)
+              val appliedOperator = {
+                val inValues = stored.inputs.map(conf.store.value)
+                inValues.foldLeft(stored.operator) { (op, v) => op(v) }
+              }
+              conf.derive("reevaluate",
+                          toReevaluate = Some((appliedOperator, toEval)),
+                          toPropagation = nextPropagation)
+            }
+          }
+        }
+    }
+  }
+
+
+  def stepReevaluation(conf: Configuration): Option[Rule] = {
+    conf.reevaluation.flatMap {
+      case (term: Stuck, reactive) => conf.derive("evaluated",
+                                                  toStore = conf.store(reactive) = term,
+                                                  toReevaluate = None)
+      case (term, reactive) =>
+        stepTerm(Configuration(term)).flatMap { inner =>
+        assert(inner.to.store.isEmpty, "inner evaluation had side effects")
+          inner.to.derive("inner", premises = List(inner),
+                          toReevaluate = Some((inner.to.term, reactive)))
+        }
+    }
+  }
+
+
+  def step(conf: Configuration): Option[Rule] = {
+    conf match {
+      case Configuration(term, store, propagation @ None, reevaluation @ None) => stepTerm(conf)
+      case Configuration(term, store, propagation, reevaluation @ None) => stepPropagation(conf)
+      case Configuration(term, store, propagation, reevaluation) => stepReevaluation(conf)
     }
   }
 
@@ -300,17 +384,14 @@ object Tfl {
     val program = account
 //    val program = times(add(one)(two))(one(add(succ(two))(times(two)(succ(two)))))
     println(program.toString())
-    val res = stepAll(Configuration(ten, Store(Map())))
+    val res = stepAll(Configuration(program))
     pprintln(toInt(res.term))
-    pprintln(toInt(program))
 //    val res = interpret(program, Map())
 //    pprintln(res)
 //    pprintln(substitute(substitute(res, Map()), Map()))
 //    println(program.tex())
 //    pprintln(interpret(program, Map()))
-    println(program.tex)
 //    println(interpret(program("1")("0"), Map()).format)
-    pprintln(stepAll(Configuration(program, Store(Map()))))
   }
 
 }
