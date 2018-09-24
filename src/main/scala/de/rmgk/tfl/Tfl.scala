@@ -39,6 +39,7 @@ object Tfl {
   case class Var(init: Term) extends Term {
     override def toString(): String = s"Var(${init.toString()})"
   }
+  case class Fold(input: Term, initial: Term, operator: Term) extends Term
   case class Access(target: Term) extends Term {
     override def toString(): String = s"${target.toString()}.value"
   }
@@ -53,18 +54,28 @@ object Tfl {
                     operator  : Term,
                     inputs    : Set[Reactive],
                     outputs   : Set[Reactive],
-                    continuous: Boolean)
+                    continuous: Boolean) {
+    def addOutput(o: Reactive): Stored = copy(outputs = outputs + o)
+  }
   object Store {
     def Evt(value: Stuck) = Stored(value, 0, unit, Set.empty, Set.empty, continuous = false)
+    def Fold(self: Reactive, inputI: Reactive, initialI: Stuck, operatorI: Stuck): Stored =
+      Stored(initialI, 0, operatorI, Set(inputI, self), Set.empty, continuous = true)
   }
 
   case class Store(mapping: Map[Reactive, Stored]) {
     def apply(r: Reactive): Stored = mapping.apply(r)
     def update(r: Reactive, v: Stuck): Store = copy(mapping.updated(r, mapping(r).copy(value = v)))
     def value(r: Reactive): Stuck = mapping.get(r).map(_.value).getOrElse(Error(s"unknown reactive $r"))
+    def addDependencies(r: Reactive, inputs: Set[Reactive]): Store = copy {
+      inputs.filter(_ != r).foldLeft(mapping){(acc, i) =>
+        acc.updated(i, mapping(i).addOutput(r))
+      }
+    }
     def add(r: Reactive, stored: Stored): Store = {
       assert(!mapping.contains(r), s"duplicate add $r")
-      copy(mapping.updated(r, stored))
+      addDependencies(r, stored.inputs)
+      .copy(mapping.updated(r, stored))
     }
   }
 
@@ -74,15 +85,16 @@ object Tfl {
 //  }
 
   def freeVariables(term: Term): Set[Identifier] = term match {
-    case id: Identifier          => Set(id)
-    case Fun(parameter, body)    => freeVariables(body) - parameter
-    case App(function, argument) => freeVariables(function) ++ freeVariables(argument)
-    case TryCatch(body, handler) => freeVariables(body) ++ freeVariables(handler)
-    case Var(init)               => freeVariables(init)
-    case Access(target)          => freeVariables(target)
+    case id: Identifier                 => Set(id)
+    case Fun(parameter, body)           => freeVariables(body) - parameter
+    case App(function, argument)        => freeVariables(function) ++ freeVariables(argument)
+    case TryCatch(body, handler)        => freeVariables(body) ++ freeVariables(handler)
+    case Var(init)                      => freeVariables(init)
+    case Fold(input, initial, operator) => freeVariables(input) ++ freeVariables(initial) ++ freeVariables(operator)
+    case Access(target)                 => freeVariables(target)
     case _: Text |
          _: Error |
-         _: Reactive             => Set()
+         _: Reactive                    => Set()
   }
 
   case class InterpreterResult(value: Stuck, store: Store)
@@ -120,6 +132,17 @@ object Tfl {
         val r = Reactive(UUID.randomUUID())
         InterpreterResult(r, store.add(r, Store.Evt(res.value)))
 
+      case Fold(input, initial, operator) =>
+        interpret(input, store) match {
+          case InterpreterResult(input : Reactive, inStore) =>
+            val initialI = interpret(initial, inStore)
+            val operatorI = interpret(operator, initialI.store)
+            val r = Reactive(UUID.randomUUID())
+            InterpreterResult(r, store.add(r, Store.Fold(r, input, initialI.value, operatorI.value)))
+          case other => other.copy(Error(s"can not fold ${other.value}"))
+        }
+
+
       case Access(target) =>
         val res = interpret(target, store)
         res.value match {
@@ -148,6 +171,7 @@ object Tfl {
       case Access(target)                  => Access(subsi(target))
       case Var(init)                       => Var(subsi(init))
       case TryCatch(body, handler)         => TryCatch(subsi(body), subsi(handler))
+      case Fold(a, b, c)                   => Fold(subsi(a), subsi(b), subsi(c))
       case _: Text |
            _: Error |
            _: Reactive |
@@ -200,6 +224,10 @@ object Tfl {
         val r = Reactive(UUID.randomUUID())
         conf.derive("var", r, newStore = conf.store.add(r, Store.Evt(init)))
 
+      case Fold(input: Reactive, initial: Value, operator: Fun) =>
+        val r = Reactive(UUID.randomUUID())
+        conf.derive("fold", r, newStore = conf.store.add(r, Store.Fold(r, input, initial, operator)))
+
 
       case tc@TryCatch(body, _)        => context(body, inner => tc.copy(body = inner))
       case app@App(_: Value, argument) => context(argument, inner => app.copy(argument = inner))
@@ -207,6 +235,9 @@ object Tfl {
       case acc@Access(target)          => context(target, inner => acc.copy(target = inner))
       case v@Var(init)                 => context(init, inner => v.copy(init = inner))
 
+      case f@Fold(_: Reactive, _: Value, term) => context(term, inner => f.copy(operator = inner))
+      case f@Fold(_: Reactive, term, _)        => context(term, inner => f.copy(initial = inner))
+      case f@Fold(term, _, _)                  => context(term, inner => f.copy(input = inner))
     }
   }
 
