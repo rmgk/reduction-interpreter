@@ -1,7 +1,5 @@
 package de.rmgk.tfl
 
-import java.util.UUID
-
 import pprint.pprintln
 
 import scala.language.implicitConversions
@@ -11,6 +9,7 @@ object Tfl {
     def apply(argument: Term) = App(this, argument)
     def =>:(identifier: Identifier): Fun = Fun(identifier, this)
     def fold(value: Term)(operator: Term) = Fold(this, value, operator)
+    def value = Access(this)
     def tex(): String = toString
   }
   sealed trait Stuck extends Term
@@ -36,10 +35,19 @@ object Tfl {
   case class Error(msg: String) extends Stuck
   case class TryCatch(body: Term, handler: Term) extends Term
 
-  case class Reactive(id: UUID) extends Value
+  case class Reactive(id: Int) extends Value {
+    override def toString: String = s"r$id"
+  }
+  object Reactive {
+    var counter = 0
+    def fresh(): Reactive = {
+      counter = counter + 1
+      Reactive(counter)
+    }
+  }
   case object Evt extends Term {
   }
-  def Var(init: Term): Term = Let('aVal, Evt, 'aVal.fold(init){'_ =>: 'new =>: 'new} )
+  def Var(init: Term): Term = Let('aVal, Evt, pair('aVal)('aVal.fold(init){'_ =>: 'new =>: 'new}) )
   case class Fold(input: Term, initial: Term, operator: Term) extends Term {
     override def toString(): String = s"Fold(${input.toString()}, ${initial.toString}, ${operator.toString})"
   }
@@ -71,15 +79,14 @@ object Tfl {
     def apply(r: Reactive): Stored = mapping.apply(r)
     def update(r: Reactive, v: Stuck): Store = copy(mapping.updated(r, mapping(r).copy(value = v)))
     def value(r: Reactive): Stuck = mapping.get(r).map(_.value).getOrElse(Error(s"unknown reactive $r"))
-    def addDependencies(r: Reactive, inputs: Iterable[Reactive]): Store = copy {
+    def addDependencies(r: Reactive, inputs: Iterable[Reactive]): Map[Reactive, Stored] = {
       inputs.filter(_ != r).foldLeft(mapping){(acc, i) =>
-        acc.updated(i, mapping(i).addOutput(r))
+        acc.updated(i, acc(i).addOutput(r))
       }
     }
     def add(r: Reactive, stored: Stored): Store = {
       assert(!mapping.contains(r), s"duplicate add $r")
-      addDependencies(r, stored.inputs)
-      .copy(mapping.updated(r, stored))
+      Store(addDependencies(r, stored.inputs).updated(r, stored))
     }
     def reactives: Set[Reactive] = mapping.keySet
   }
@@ -133,7 +140,7 @@ object Tfl {
         }
 
       case Evt =>
-        val r = Reactive(UUID.randomUUID())
+        val r = Reactive.fresh()
         InterpreterResult(r, store.add(r, Store.Evt()))
 
       case Fold(input, initial, operator) =>
@@ -141,7 +148,7 @@ object Tfl {
           case InterpreterResult(input : Reactive, inStore) =>
             val initialI = interpret(initial, inStore)
             val operatorI = interpret(operator, initialI.store)
-            val r = Reactive(UUID.randomUUID())
+            val r = Reactive.fresh()
             InterpreterResult(r, store.add(r, Store.Fold(r, input, initialI.value, operatorI.value)))
           case other => other.copy(Error(s"can not fold ${other.value}"))
         }
@@ -205,7 +212,7 @@ object Tfl {
     : Some[Rule] = {
       Some(Rule(name, this, Configuration(toTerm, toStore, toPropagation, toReevaluate), premises))
     }
-    def format(): String = term.toString()
+    def format(): String = s"${term.toString()} {${store.toString}}"
     def tex(): String = term.tex()
   }
   object Configuration {
@@ -245,18 +252,20 @@ object Tfl {
       case TryCatch(Error(_), handler) => conf.derive("catch", handler)
       case TryCatch(value: Value, _)   => conf.derive("try", value)
 
-      case App(r: Reactive, v: Value) => conf.derive("fire", r, toStore = conf.store(r) = v,
+      // firing of events
+      case App(r: Reactive, v: Value) =>
+        conf.derive("fire", r, toStore = conf.store(r) = v,
                                                      toPropagation = Some(UpdatePropagation(conf.store(r).outputs,
                                                                                             Set(r))))
 
       case Access(target: Reactive) => conf.derive("access", conf.store.value(target))
 
       case Evt =>
-        val r = Reactive(UUID.randomUUID())
+        val r = Reactive.fresh()
         conf.derive("var", r, toStore = conf.store.add(r, Store.Evt()))
 
       case Fold(input: Reactive, initial: Value, operator: Fun) =>
-        val r = Reactive(UUID.randomUUID())
+        val r = Reactive.fresh()
         conf.derive("fold", r, toStore = conf.store.add(r, Store.Fold(r, input, initial, operator)))
 
 
@@ -280,7 +289,7 @@ object Tfl {
       case currentPropagation@UpdatePropagation(outdated, finalized) =>
         if (outdated.isEmpty) conf.derive("clean", toPropagation = None)
         else {
-          val skippable = conf.store.reactives.filter(ready(finalized))
+          val skippable = conf.store.reactives.filter(ready(finalized)) -- outdated -- finalized
           if (skippable.nonEmpty) {
             conf.derive("skip", toPropagation = currentPropagation.skip(skippable))
           }
@@ -310,7 +319,7 @@ object Tfl {
       case (term, reactive) =>
         stepTerm(Configuration(term)).flatMap { inner =>
         assert(inner.to.store.isEmpty, "inner evaluation had side effects")
-          inner.to.derive("inner", premises = List(inner),
+          conf.derive("inner", premises = List(inner),
                           toReevaluate = Some((inner.to.term, reactive)))
         }
     }
@@ -356,7 +365,7 @@ object Tfl {
   }
 
 
-  val id   : Fun = 'x =>: 'x
+  val id   : Fun = 'id =>: 'id
   val zero : Fun = 'f =>: 'x =>: 'x
   val unit : Fun = zero
   val one  : Fun = id
@@ -366,15 +375,20 @@ object Tfl {
   val times: Fun = 'a =>: 'b =>: 'f =>: 'x =>: 'a ('b ('f)('x))
   val four       = times(two)(two)
   val ten        = times(succ(four))(two)
+  val pair : Fun = 'first =>: 'second =>: 'res =>: 'res('first)('second)
+  val first: Fun = 'pair =>: 'pair('f =>: '_ =>: 'f)
+  val second: Fun = 'pair =>: 'pair('_ =>: 's =>: 's)
+  val now: Fun = 'var =>: second('var).value
+  val set: Fun = first
 
   def account: Term =
     Let('balance, Var(one),
-        Let('deposit, 'amount =>: 'balance (add(Access('balance))('amount)),
+        Let('deposit, 'amount =>: set('balance)(add(now('balance))('amount)),
             execute(
               'deposit (one),
               'deposit (two),
               'deposit (ten),
-              Access('balance)
+              now('balance)
             )
         )
     )
