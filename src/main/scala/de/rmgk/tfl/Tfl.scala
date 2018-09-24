@@ -46,7 +46,27 @@ object Tfl {
   def Let(identifier: Identifier, boundValue: Term, body: Term): App = (identifier =>: body) apply boundValue
   def execute(terms: Term*): Term = terms.reduceRight { (t, acc) => Let('_, t, acc) }
 
-  type Store = Map[Reactive, Stuck]
+  type Time = Int
+
+  case class Stored(value     : Stuck,
+                    time      : Time,
+                    operator  : Term,
+                    inputs    : Set[Reactive],
+                    outputs   : Set[Reactive],
+                    continuous: Boolean)
+  object Store {
+    def Evt(value: Stuck) = Stored(value, 0, unit, Set.empty, Set.empty, continuous = false)
+  }
+
+  case class Store(mapping: Map[Reactive, Stored]) {
+    def apply(r: Reactive): Stored = mapping.apply(r)
+    def update(r: Reactive, v: Stuck): Store = copy(mapping.updated(r, mapping(r).copy(value = v)))
+    def value(r: Reactive): Stuck = mapping.get(r).map(_.value).getOrElse(Error(s"unknown reactive $r"))
+    def add(r: Reactive, stored: Stored): Store = {
+      assert(!mapping.contains(r), s"duplicate add $r")
+      copy(mapping.updated(r, stored))
+    }
+  }
 
 //  case class Closure(fun: Fun, environment: Environment) extends Value {
 //    override def format(): String = s"Closure(${fun.format()},$environment)"
@@ -84,7 +104,7 @@ object Tfl {
             }
           case other: Error  => evaluatedFunction.copy(other)
           case r: Reactive   =>
-            InterpreterResult(r, argument.store.updated(r, argument.value))
+            InterpreterResult(r, argument.store(r) = argument.value)
 
         }
 
@@ -98,12 +118,12 @@ object Tfl {
       case Var(init) =>
         val res = interpret(init, store)
         val r = Reactive(UUID.randomUUID())
-        InterpreterResult(r, store.updated(r, res.value))
+        InterpreterResult(r, store.add(r, Store.Evt(res.value)))
 
       case Access(target) =>
         val res = interpret(target, store)
         res.value match {
-          case r: Reactive => InterpreterResult(store.getOrElse(r, Error(s"unknown reactive $r")), res.store)
+          case r: Reactive => InterpreterResult(store.value(r), res.store)
           case other       => res.copy(other)
         }
 
@@ -174,13 +194,11 @@ object Tfl {
       case TryCatch(Error(_), handler) => conf.derive("catch", handler)
       case TryCatch(value: Value, _)   => conf.derive("try", value)
 
-      case App(r: Reactive, v: Value) => conf.derive("fire", r, newStore = conf.store.updated(r, v))
-      case Access(target: Reactive)   => conf.derive("access",
-                                                     conf.store.getOrElse(target,
-                                                                          Error(s"access unknown reactive $target")))
+      case App(r: Reactive, v: Value) => conf.derive("fire", r, newStore = conf.store(r) = v)
+      case Access(target: Reactive)   => conf.derive("access", conf.store.value(target))
       case Var(init: Value)           =>
         val r = Reactive(UUID.randomUUID())
-        conf.derive("var", r, newStore = conf.store.updated(r, init))
+        conf.derive("var", r, newStore = conf.store.add(r, Store.Evt(init)))
 
 
       case tc@TryCatch(body, _)        => context(body, inner => tc.copy(body = inner))
@@ -209,13 +227,13 @@ object Tfl {
     def evaluateFun(t: Term, store: Store): Term = {
       val res = interpret(t, store)
       res.value match {
-        case t: Fun   =>
+        case t: Fun =>
           evaluateFun(t(""), res.store)
-        case other => other
+        case other  => other
       }
     }
 
-    val res = evaluateFun(value("1"), Map())
+    val res = evaluateFun(value("1"), Store(Map()))
     res match {
       case Text(str) => Right(str.count(_ == '1'))
       case other     => Left(other)
@@ -225,6 +243,7 @@ object Tfl {
 
   val id   : Fun = 'x =>: 'x
   val zero : Fun = 'f =>: 'x =>: 'x
+  val unit : Fun = zero
   val one  : Fun = id
   val succ : Fun = 'a =>: 'f =>: 'x =>: 'f ('a ('f)('x))
   val add  : Fun = 'a =>: 'b =>: 'f =>: 'x =>: 'a ('f)('b ('f)('x))
@@ -250,7 +269,7 @@ object Tfl {
     val program = account
 //    val program = times(add(one)(two))(one(add(succ(two))(times(two)(succ(two)))))
     println(program.toString())
-    val res = stepAll(Configuration(ten, Map()))
+    val res = stepAll(Configuration(ten, Store(Map())))
     pprintln(toInt(res.term))
     pprintln(toInt(program))
 //    val res = interpret(program, Map())
@@ -260,7 +279,7 @@ object Tfl {
 //    pprintln(interpret(program, Map()))
     println(program.tex)
 //    println(interpret(program("1")("0"), Map()).format)
-    pprintln(stepAll(Configuration(program, Map())))
+    pprintln(stepAll(Configuration(program, Store(Map()))))
   }
 
 }
