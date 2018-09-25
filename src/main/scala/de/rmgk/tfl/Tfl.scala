@@ -1,7 +1,5 @@
 package de.rmgk.tfl
 
-import pprint.pprintln
-
 import scala.language.implicitConversions
 
 object Tfl {
@@ -364,33 +362,32 @@ object Tfl {
 
   def toInt(value: Term): Either[Term, Int] = {
 
-    @scala.annotation.tailrec
-    def evaluateFun(t: Term, store: Store): Term = {
-      val res = interpret(t, store)
+    def evaluateFun(term: Term, store: Store, acc: Int): Either[Term, Int] = {
+      val res = interpret(term, store)
       res.value match {
-        case t: Fun =>
-          evaluateFun(t(""), res.store)
-        case other  => other
+        case `zero` => Right(acc)
+
+        case Fun(Identifier('succ), Fun(Identifier('base), App(Identifier('succ), t))) =>
+          evaluateFun(subs(subs(t, 'base, zero), 'succ, succ), store, acc + 1)
+
+        case other =>
+          if (acc != 0) println(s"warning, not quite a numerical structure? at $acc + $res")
+          evaluateFun(other(succ)(zero), store, acc)
       }
     }
 
-    println(interpret(value(succ)(zero)(succ)(zero)(succ)(zero)(succ)(zero)(succ)(zero)(succ)(zero), Store(Map())))
-    val res = evaluateFun(value("1"), Store(Map()))
-    res match {
-      case Text(str) => Right(str.count(_ == '1'))
-      case other     => Left(other)
-    }
+    evaluateFun(value, Store(Map()), 0)
   }
 
 
   val id    : Fun = 'id =>: 'id
-  val zero  : Fun = 'zero =>: 'x =>: 'x
+  val zero  : Fun = 'zero =>: id
   val unit  : Fun = zero
   val one   : Fun = id
-  val succ  : Fun = 'a =>: 'succ =>: 'x =>: 'succ ('a ('succ)('x))
+  val succ  : Fun = 'a =>: 'succ =>: 'base =>: 'succ ('a ('succ)('base))
   val add   : Fun = 'a =>: 'b =>: 'f =>: 'x =>: 'a ('f)('b ('f)('x))
   val two   : App = add(one)(one)
-  val times : Fun = 'a =>: 'b =>: 'f =>: 'x =>: 'a ('b ('f)('x))
+  val times : Fun = 'a =>: 'b =>: 'f =>: 'x =>: 'a ('b ('f))('x)
   val four  : App = times(two)(two)
   val ten   : App = times(succ(four))(two)
   val pair  : Fun = 'first =>: 'second =>: 'res =>: 'res('first)('second)
@@ -421,8 +418,11 @@ object Tfl {
     val program = account
 //    val program = times(add(one)(two))(one(add(succ(two))(times(two)(succ(two)))))
     println(program.toString())
-//    val res = stepAll(Configuration(program))
-    pprintln(toInt(times(two)(ten)))
+
+    val res = stepAll(Configuration(program))
+    println(toInt(res.term))
+    println(toInt(first(pair)))
+//    pprintln(toInt(times(two)(ten)))
 //    val res = interpret(program, Map())
 //    pprintln(res)
 //    pprintln(substitute(substitute(res, Map()), Map()))
