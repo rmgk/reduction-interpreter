@@ -45,8 +45,8 @@ object Tfl {
       Reactive(counter)
     }
   }
-  case object Evt extends Term {
-  }
+  case class React(input1: Term, input2: Term, operator: Term) extends Term
+  case object Evt extends Term
   def Var(init: Term): Term = Let('aVal, Evt, pair('aVal)('aVal.fold(init){'_ =>: 'new =>: 'new}) )
   case class Fold(input: Term, initial: Term, operator: Term) extends Term {
     override def toString(): String = s"Fold(${input.toString()}, ${initial.toString}, ${operator.toString})"
@@ -72,6 +72,7 @@ object Tfl {
     def Evt() = Stored(unit, 0, unit, Nil, Set.empty, continuous = false)
     def Fold(self: Reactive, inputI: Reactive, initialI: Stuck, operatorI: Stuck): Stored =
       Stored(initialI, 0, operatorI, List(self, inputI), Set.empty, continuous = true)
+    def React(inputs: List[Reactive], operator: Stuck) = Stored(unit, 0, operator, inputs, Set.empty, continuous = true)
   }
 
   case class Store(mapping: Map[Reactive, Stored]) {
@@ -102,6 +103,7 @@ object Tfl {
     case App(function, argument)        => freeVariables(function) ++ freeVariables(argument)
     case TryCatch(body, handler)        => freeVariables(body) ++ freeVariables(handler)
     case Fold(input, initial, operator) => freeVariables(input) ++ freeVariables(initial) ++ freeVariables(operator)
+    case React(i1, i2, op)              => freeVariables(i1) ++ freeVariables(i2) ++ freeVariables(op)
     case Access(target)                 => freeVariables(target)
     case _: Text |
          _: Error |
@@ -153,6 +155,7 @@ object Tfl {
           case other => other.copy(Error(s"can not fold ${other.value}"))
         }
 
+      case react: React => ???
 
       case Access(target) =>
         val res = interpret(target, store)
@@ -167,8 +170,8 @@ object Tfl {
   }
 
   def subs(term: Term, parameter: Identifier, argument: Term): Term = {
-    val freeVar = freeVariables(argument)
-    assert(freeVar == Set(), s"unbound identifier $freeVar")
+//    val freeVar = freeVariables(argument)
+//    assert(freeVar == Set(), s"unbound identifier $freeVar")
 
     def subsi(t: Term) = subs(t, parameter, argument)
 
@@ -182,6 +185,7 @@ object Tfl {
       case Access(target)                  => Access(subsi(target))
       case TryCatch(body, handler)         => TryCatch(subsi(body), subsi(handler))
       case Fold(a, b, c)                   => Fold(subsi(a), subsi(b), subsi(c))
+      case React(a, b, c)                  => React(subsi(a), subsi(b), subsi(c))
       case _: Text |
            _: Error |
            _: Reactive |
@@ -255,14 +259,22 @@ object Tfl {
       // firing of events
       case App(r: Reactive, v: Value) =>
         conf.derive("fire", r, toStore = conf.store(r) = v,
-                                                     toPropagation = Some(UpdatePropagation(conf.store(r).outputs,
-                                                                                            Set(r))))
+                    toPropagation = Some(UpdatePropagation(conf.store(r).outputs, Set(r))))
 
       case Access(target: Reactive) => conf.derive("access", conf.store.value(target))
 
       case Evt =>
         val r = Reactive.fresh()
         conf.derive("var", r, toStore = conf.store.add(r, Store.Evt()))
+
+      case React(input1: Reactive, input2: Reactive, operator: Value) =>
+        val r = Reactive.fresh()
+        val stored = Store.React(List(input1, input2), operator)
+        conf.derive("init",
+                    toTerm = r,
+                    toStore = conf.store.add(r, stored),
+                    toReevaluate = Some((applyOperator(conf, stored), r)))
+
 
       case Fold(input: Reactive, initial: Value, operator: Fun) =>
         val r = Reactive.fresh()
@@ -277,6 +289,11 @@ object Tfl {
       case f@Fold(_: Reactive, _: Value, term) => context(term, inner => f.copy(operator = inner))
       case f@Fold(_: Reactive, term, _)        => context(term, inner => f.copy(initial = inner))
       case f@Fold(term, _, _)                  => context(term, inner => f.copy(input = inner))
+
+      case r@React(_: Reactive, _: Reactive, term) => context(term, inner => r.copy(operator = inner))
+      case r@React(_: Reactive, term, _)           => context(term, inner => r.copy(input2 = inner))
+      case r@React(term, _, _)                     => context(term, inner => r.copy(input1 = inner))
+
     }
   }
 
@@ -297,12 +314,8 @@ object Tfl {
             outdated.find(ready(finalized)).flatMap { toEval =>
               val stored = conf.store(toEval)
               val nextPropagation = currentPropagation.reevaluate(toEval, stored.outputs)
-              val appliedOperator = {
-                val inValues = stored.inputs.map(conf.store.value)
-                inValues.foldLeft(stored.operator) { (op, v) => op(v) }
-              }
               conf.derive("reevaluate",
-                          toReevaluate = Some((appliedOperator, toEval)),
+                          toReevaluate = Some((applyOperator(conf, stored), toEval)),
                           toPropagation = nextPropagation)
             }
           }
@@ -310,6 +323,10 @@ object Tfl {
     }
   }
 
+  private def applyOperator(conf: Configuration, stored: Stored): Term = {
+    val inValues = stored.inputs.map(conf.store.value)
+    inValues.foldLeft(stored.operator) { (op, v) => op(v) }
+  }
 
   def stepReevaluation(conf: Configuration): Option[Rule] = {
     conf.reevaluation.flatMap {
@@ -357,6 +374,7 @@ object Tfl {
       }
     }
 
+    println(interpret(value(succ)(zero)(succ)(zero)(succ)(zero)(succ)(zero)(succ)(zero)(succ)(zero), Store(Map())))
     val res = evaluateFun(value("1"), Store(Map()))
     res match {
       case Text(str) => Right(str.count(_ == '1'))
@@ -365,30 +383,35 @@ object Tfl {
   }
 
 
-  val id   : Fun = 'id =>: 'id
-  val zero : Fun = 'f =>: 'x =>: 'x
-  val unit : Fun = zero
-  val one  : Fun = id
-  val succ : Fun = 'a =>: 'f =>: 'x =>: 'f ('a ('f)('x))
-  val add  : Fun = 'a =>: 'b =>: 'f =>: 'x =>: 'a ('f)('b ('f)('x))
-  val two  : App = add(one)(one)
-  val times: Fun = 'a =>: 'b =>: 'f =>: 'x =>: 'a ('b ('f)('x))
-  val four       = times(two)(two)
-  val ten        = times(succ(four))(two)
-  val pair : Fun = 'first =>: 'second =>: 'res =>: 'res('first)('second)
-  val first: Fun = 'pair =>: 'pair('f =>: '_ =>: 'f)
+  val id    : Fun = 'id =>: 'id
+  val zero  : Fun = 'zero =>: 'x =>: 'x
+  val unit  : Fun = zero
+  val one   : Fun = id
+  val succ  : Fun = 'a =>: 'succ =>: 'x =>: 'succ ('a ('succ)('x))
+  val add   : Fun = 'a =>: 'b =>: 'f =>: 'x =>: 'a ('f)('b ('f)('x))
+  val two   : App = add(one)(one)
+  val times : Fun = 'a =>: 'b =>: 'f =>: 'x =>: 'a ('b ('f)('x))
+  val four  : App = times(two)(two)
+  val ten   : App = times(succ(four))(two)
+  val pair  : Fun = 'first =>: 'second =>: 'res =>: 'res('first)('second)
+  val first : Fun = 'pair =>: 'pair('f =>: '_ =>: 'f)
   val second: Fun = 'pair =>: 'pair('_ =>: 's =>: 's)
-  val now: Fun = 'var =>: second('var).value
-  val set: Fun = first
+  val now   : Fun = 'var =>: second('var).value
+  val set   : Fun = first
 
   def account: Term =
     Let('balance, Var(one),
         Let('deposit, 'amount =>: set('balance)(add(now('balance))('amount)),
-            execute(
-              'deposit (one),
-              'deposit (two),
-              'deposit (ten),
-              now('balance)
+            Let('multiplier, Var(two),
+                Let('result, React(second('deposit), second('multiplier), times),
+                    execute(
+                      'deposit (one),
+                      'deposit (two),
+                      'deposit (ten),
+                      set('multiplier)(ten),
+                      Access('result)
+                    )
+                )
             )
         )
     )
@@ -398,8 +421,8 @@ object Tfl {
     val program = account
 //    val program = times(add(one)(two))(one(add(succ(two))(times(two)(succ(two)))))
     println(program.toString())
-    val res = stepAll(Configuration(program))
-    pprintln(toInt(res.term))
+//    val res = stepAll(Configuration(program))
+    pprintln(toInt(times(two)(ten)))
 //    val res = interpret(program, Map())
 //    pprintln(res)
 //    pprintln(substitute(substitute(res, Map()), Map()))
