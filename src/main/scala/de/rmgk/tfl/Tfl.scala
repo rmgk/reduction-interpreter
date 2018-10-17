@@ -43,9 +43,9 @@ object Tfl {
       Reactive(counter)
     }
   }
-  case class React(input1: Term, input2: Term, operator: Term) extends Term
-  case object Evt extends Term
-  def Var(init: Term): Term = Let('aVal, Evt, pair('aVal)('aVal.fold(init){'_ =>: 'new =>: 'new}) )
+  case class Derive(input1: Term, input2: Term, operator: Term) extends Term
+  case object Source extends Term
+  def Source(init: Term): Term = Let('aVal, Source, pair('aVal)('aVal.fold(init){'_ =>: 'new =>: 'new}) )
   case class Fold(input: Term, initial: Term, operator: Term) extends Term {
     override def toString(): String = s"Fold(${input.toString()}, ${initial.toString}, ${operator.toString})"
   }
@@ -101,12 +101,12 @@ object Tfl {
     case App(function, argument)        => freeVariables(function) ++ freeVariables(argument)
     case TryCatch(body, handler)        => freeVariables(body) ++ freeVariables(handler)
     case Fold(input, initial, operator) => freeVariables(input) ++ freeVariables(initial) ++ freeVariables(operator)
-    case React(i1, i2, op)              => freeVariables(i1) ++ freeVariables(i2) ++ freeVariables(op)
+    case Derive(i1, i2, op)             => freeVariables(i1) ++ freeVariables(i2) ++ freeVariables(op)
     case Access(target)                 => freeVariables(target)
     case _: Text |
          _: Error |
          _: Reactive |
-         Evt                            => Set()
+         Source                         => Set()
   }
 
   case class InterpreterResult(value: Stuck, store: Store)
@@ -139,7 +139,7 @@ object Tfl {
           case other    => res.copy(other)
         }
 
-      case Evt =>
+      case Source =>
         val r = Reactive.fresh()
         InterpreterResult(r, store.add(r, Store.Evt()))
 
@@ -153,7 +153,7 @@ object Tfl {
           case other => other.copy(Error(s"can not fold ${other.value}"))
         }
 
-      case react: React => ???
+      case react: Derive => ???
 
       case Access(target) =>
         val res = interpret(target, store)
@@ -181,14 +181,14 @@ object Tfl {
       case App(functionTerm, argumentTerm) =>
         App(subs(functionTerm, parameter, argument), subsi(argumentTerm))
       case Access(target)                  => Access(subsi(target))
-      case TryCatch(body, handler)         => TryCatch(subsi(body), subsi(handler))
+      case TryCatch(body, handler) => TryCatch(subsi(body), subsi(handler))
       case Fold(a, b, c)                   => Fold(subsi(a), subsi(b), subsi(c))
-      case React(a, b, c)                  => React(subsi(a), subsi(b), subsi(c))
+      case Derive(a, b, c)                 => Derive(subsi(a), subsi(b), subsi(c))
       case _: Text |
            _: Error |
            _: Reactive |
            _: Identifier |
-           Evt                             => term
+           Source                          => term
     }
   }
 
@@ -261,11 +261,11 @@ object Tfl {
 
       case Access(target: Reactive) => conf.derive("access", conf.store.value(target))
 
-      case Evt =>
+      case Source =>
         val r = Reactive.fresh()
         conf.derive("var", r, toStore = conf.store.add(r, Store.Evt()))
 
-      case React(input1: Reactive, input2: Reactive, operator: Value) =>
+      case Derive(input1: Reactive, input2: Reactive, operator: Value) =>
         val r = Reactive.fresh()
         val stored = Store.React(List(input1, input2), operator)
         conf.derive("init",
@@ -288,9 +288,9 @@ object Tfl {
       case f@Fold(_: Reactive, term, _)        => context(term, inner => f.copy(initial = inner))
       case f@Fold(term, _, _)                  => context(term, inner => f.copy(input = inner))
 
-      case r@React(_: Reactive, _: Reactive, term) => context(term, inner => r.copy(operator = inner))
-      case r@React(_: Reactive, term, _)           => context(term, inner => r.copy(input2 = inner))
-      case r@React(term, _, _)                     => context(term, inner => r.copy(input1 = inner))
+      case r@Derive(_: Reactive, _: Reactive, term) => context(term, inner => r.copy(operator = inner))
+      case r@Derive(_: Reactive, term, _)           => context(term, inner => r.copy(input2 = inner))
+      case r@Derive(term, _, _)                     => context(term, inner => r.copy(input1 = inner))
 
     }
   }
@@ -397,10 +397,10 @@ object Tfl {
   val set   : Fun = first
 
   def account: Term =
-    Let('balance, Var(one),
+    Let('balance, Source(one),
         Let('deposit, 'amount =>: set('balance)(add(now('balance))('amount)),
-            Let('multiplier, Var(two),
-                Let('result, React(second('deposit), second('multiplier), times),
+            Let('multiplier, Source(two),
+                Let('result, Derive(second('deposit), second('multiplier), times),
                     execute(
                       'deposit (one),
                       'deposit (two),
